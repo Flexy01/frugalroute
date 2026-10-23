@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frugalroute"
+version = "0.1.0"
+description = "Route each prompt to the cheapest sufficient model, with forward-only fallback."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[project.scripts]
+frugalroute = "frugalroute:main"
+
+[tool.setuptools]
+py-modules = ["frugalroute"]
