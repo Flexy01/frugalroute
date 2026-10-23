@@ -70,8 +70,68 @@ def test_classify_long_and_code_and_keywords_climb():
     assert {"long", "code-block", "keyword"} <= set(reasons)
 
 
+def test_classify_ignores_substring_false_positives():
+    for text in ("I disapprove of this change", "proofread this", "an optimistic estimate"):
+        assert fr.classify(text, 3)[0] == 0, text
+
+
 def test_classify_clamps_to_top_tier():
     assert fr.classify("analyze " * 2000 + "``` ```", 2)[0] == 1
+
+
+def test_chat_rejects_error_envelope_and_empty_content(cfg, monkeypatch):
+    for payload in ({"error": {"message": "overloaded"}},
+                    {"choices": [{"message": {"content": None}}]},
+                    {"choices": []}):
+        monkeypatch.setattr(fr, "_open", lambda req, timeout, p=payload: FakeResponse(p))
+        with pytest.raises(RuntimeError):
+            fr.chat(cfg, "m-cheap", "hi")
+
+
+def test_chat_refuses_redirect(cfg, monkeypatch):
+    class Redirect:
+        def redirect_request(self, *args, **kwargs):
+            return fr._NoRedirect().redirect_request(*args, **kwargs)
+
+    with pytest.raises(RuntimeError, match="redirect"):
+        Redirect().redirect_request()
+
+
+def test_log_call_warns_instead_of_crashing(cfg, capsys):
+    cfg["log_path"] = cfg["log_path"].parent  # a directory: open("a") fails with OSError
+    fr.log_call(cfg, {"ok": True})
+    assert "could not write log" in capsys.readouterr().err
+
+
+def test_ask_stops_on_client_error_without_retrying(cfg, monkeypatch):
+    import urllib.error
+
+    seen = []
+
+    def fake_open(req, timeout):
+        seen.append(json.loads(req.data)["model"])
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(fr, "_open", fake_open)
+    with pytest.raises(SystemExit, match="401"):
+        fr.ask(cfg, "hello", tier="standard")
+    assert seen == ["m-std-1"]
+
+
+def test_stats_survives_corrupt_line(cfg, capsys):
+    cfg["log_path"].write_text('{"ok": true, "cost_usd": null}\nnot json\n')
+    fr.stats(cfg)
+    assert "unknown" in capsys.readouterr().out
+
+
+def test_load_config_rejects_pricing_without_input(tmp_path):
+    path = tmp_path / "bad2.toml"
+    path.write_text(
+        'base_url = "http://x"\napi_key_env = "K"\n'
+        '[[tiers]]\nname = "a"\nmodels = ["m"]\n[pricing."m"]\noutput = 1.0\n'
+    )
+    with pytest.raises(SystemExit, match="input"):
+        fr.load_config(path)
 
 
 def test_fallback_chain_only_moves_up(cfg):
