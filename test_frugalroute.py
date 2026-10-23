@@ -20,11 +20,16 @@ class FakeResponse:
 
 
 def ok(model, prompt_tokens=10, completion_tokens=5, content="hi"):
-    return FakeResponse({
-        "model": model,
-        "choices": [{"message": {"role": "assistant", "content": content}}],
-        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
-    })
+    return FakeResponse(
+        {
+            "model": model,
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        }
+    )
 
 
 @pytest.fixture
@@ -64,14 +69,18 @@ def test_classify_long_and_code_and_keywords_climb():
     long_plain = "word " * 400
     assert fr.classify(long_plain, 3)[0] == 1
 
-    hard = ("analyze this refactor step-by-step: " + "x " * 1000 + "\n```py\ncode\n```")
+    hard = "analyze this refactor step-by-step: " + "x " * 1000 + "\n```py\ncode\n```"
     index, reasons = fr.classify(hard, 3)
     assert index == 2
     assert {"long", "code-block", "keyword"} <= set(reasons)
 
 
 def test_classify_ignores_substring_false_positives():
-    for text in ("I disapprove of this change", "proofread this", "an optimistic estimate"):
+    for text in (
+        "I disapprove of this change",
+        "proofread this",
+        "an optimistic estimate",
+    ):
         assert fr.classify(text, 3)[0] == 0, text
 
 
@@ -80,9 +89,11 @@ def test_classify_clamps_to_top_tier():
 
 
 def test_chat_rejects_error_envelope_and_empty_content(cfg, monkeypatch):
-    for payload in ({"error": {"message": "overloaded"}},
-                    {"choices": [{"message": {"content": None}}]},
-                    {"choices": []}):
+    for payload in (
+        {"error": {"message": "overloaded"}},
+        {"choices": [{"message": {"content": None}}]},
+        {"choices": []},
+    ):
         monkeypatch.setattr(fr, "_open", lambda req, timeout, p=payload: FakeResponse(p))
         with pytest.raises(RuntimeError):
             fr.chat(cfg, "m-cheap", "hi")
@@ -147,12 +158,17 @@ def test_ask_falls_forward_on_non_401_http_errors(cfg, monkeypatch, code):
 
 
 def test_stats_skips_malformed_rows_without_crashing(cfg, capsys):
-    cfg["log_path"].write_text("\n".join([
-        "not json",
-        "[1, 2, 3]",                                        # valid JSON, not an object
-        '{"ok": true, "model": "m-cheap", "cost_usd": null, "prompt_tokens": "x"}',
-        '{"ok": true, "model": "m-cheap", "cost_usd": 0.5}',
-    ]) + "\n")
+    cfg["log_path"].write_text(
+        "\n".join(
+            [
+                "not json",
+                "[1, 2, 3]",  # valid JSON, not an object
+                '{"ok": true, "model": "m-cheap", "cost_usd": null, "prompt_tokens": "x"}',
+                '{"ok": true, "model": "m-cheap", "cost_usd": 0.5}',
+            ]
+        )
+        + "\n"
+    )
 
     fr.stats(cfg)
 
@@ -170,6 +186,47 @@ def test_load_config_rejects_non_numeric_price(tmp_path):
     )
     with pytest.raises(SystemExit, match="input must be a number"):
         fr.load_config(path)
+
+
+def test_load_config_applies_timeout(tmp_path):
+    path = tmp_path / "t.toml"
+    body = (
+        'base_url = "http://x"\napi_key_env = "K"\n'
+        '[[tiers]]\nname = "a"\nmodels = ["m"]\n[pricing."m"]\ninput = 1.0\noutput = 2.0\n'
+    )
+    path.write_text(body)
+    assert fr.load_config(path)["timeout"] == fr.DEFAULT_TIMEOUT
+
+    path.write_text(body.replace('api_key_env = "K"\n', 'api_key_env = "K"\ntimeout = 12.5\n'))
+    assert fr.load_config(path)["timeout"] == 12.5
+
+    path.write_text(body.replace('api_key_env = "K"\n', 'api_key_env = "K"\ntimeout = 0\n'))
+    with pytest.raises(SystemExit, match="timeout"):
+        fr.load_config(path)
+
+
+def test_cli_version_flag():
+    with pytest.raises(SystemExit) as excinfo:
+        fr.main(["--version"])
+    assert excinfo.value.code == 0
+
+
+def _raise(*_args, **_kwargs):
+    raise RuntimeError("x")
+
+
+def test_cli_returns_1_when_every_model_fails(cfg, monkeypatch, capsys):
+    path = cfg["log_path"].parent / "cfg.toml"
+    path.write_text(
+        'base_url = "https://example.test/v1"\napi_key_env = "TEST_API_KEY"\n'
+        f'log_path = "{cfg["log_path"].as_posix()}"\n'
+        '[[tiers]]\nname = "cheap"\nmodels = ["m-cheap"]\n'
+        '[pricing."m-cheap"]\ninput = 1.0\noutput = 2.0\n'
+    )
+    monkeypatch.setattr(fr, "_open", _raise)
+
+    assert fr.main(["ask", "hi", "--config", str(path)]) == 1
+    assert "all models failed" in capsys.readouterr().err
 
 
 def test_unpriceable_model_still_returns_paid_answer(cfg, monkeypatch, capsys):
@@ -192,7 +249,9 @@ def test_fallback_chain_only_moves_up(cfg):
 def test_cost_usd(cfg):
     assert fr.cost_usd(cfg, "m-std-2", 1_000_000, 0) == pytest.approx(2.00)
     assert fr.cost_usd(cfg, "m-std-2", 0, 1_000_000) == pytest.approx(8.00)
-    assert fr.cost_usd(cfg, "m-cheap", 1000, 500) == pytest.approx((1000 * 0.15 + 500 * 0.60) / 1_000_000)
+    assert fr.cost_usd(cfg, "m-cheap", 1000, 500) == pytest.approx(
+        (1000 * 0.15 + 500 * 0.60) / 1_000_000
+    )
 
 
 def test_ask_success_logs_and_returns_metadata(cfg, monkeypatch):
@@ -260,7 +319,9 @@ def test_stats_sums_total_and_per_model(cfg, monkeypatch, capsys):
     fr.stats(cfg)
 
     out = capsys.readouterr().out
-    expected_total = (1000 * 0.15 + 1000 * 0.60) / 1_000_000 + (2000 * 10.0 + 500 * 30.0) / 1_000_000
+    expected_total = (1000 * 0.15 + 1000 * 0.60) / 1_000_000 + (
+        2000 * 10.0 + 500 * 30.0
+    ) / 1_000_000
     assert "m-cheap" in out and "m-strong" in out
     assert f"{expected_total:.6f}" in out
 
@@ -274,6 +335,8 @@ def test_missing_api_key_exits(cfg, monkeypatch):
 
 def test_load_config_rejects_missing_pricing(tmp_path, monkeypatch):
     path = tmp_path / "bad.toml"
-    path.write_text('base_url = "http://x"\napi_key_env = "K"\n[[tiers]]\nname = "a"\nmodels = ["m"]\n')
+    path.write_text(
+        'base_url = "http://x"\napi_key_env = "K"\n[[tiers]]\nname = "a"\nmodels = ["m"]\n'
+    )
     with pytest.raises(SystemExit, match="pricing"):
         fr.load_config(path)

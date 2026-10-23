@@ -6,6 +6,9 @@ dist/
 .venv/
 venv/
 .pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # local config and call logs — never commit
 frugalroute.toml

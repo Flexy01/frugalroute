@@ -1,7 +1,9 @@
 # Tiers are ordered cheapest -> strongest. Fallback only moves forward.
+# Any OpenAI-compatible endpoint works; only base_url changes.
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 log_path = "~/.frugalroute/calls.jsonl"
+timeout = 60
 
 [[tiers]]
 name = "cheap"
@@ -15,7 +17,7 @@ models = ["gpt-4o", "gpt-4.1"]
 name = "strong"
 models = ["o3"]
 
-# USD per 1M tokens.
+# USD per 1M tokens. Every model listed above needs an entry here.
 [pricing."gpt-4o-mini"]
 input = 0.15
 output = 0.60
