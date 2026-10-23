@@ -60,9 +60,14 @@ frugalroute stats
 ```
 
 `ask` classifies the prompt with cheap rules (length, code blocks, difficulty
-keywords) and starts at the matching tier. If a model errors, the next model in
-the chain is tried; the chain only moves toward stronger tiers, never back.
-The answer goes to stdout, the chosen model and cost to stderr.
+keywords) and starts at the matching tier. The answer goes to stdout, the chosen
+model and cost to stderr.
+
+Fallback: if a model fails, the next model in the chain is tried and the chain
+only moves toward stronger tiers, never back. `HTTP 401` is the one exception —
+an invalid key fails the same way for every model, so the chain stops there and
+the command exits with status 1. Every other error, including 400, 403, 404, 408,
+429 and 5xx, falls forward to the next model.
 
 `stats` reports total and per-model spend from the JSONL log:
 
@@ -73,8 +78,12 @@ gpt-4o         1       910         240     0.004675
 total          4                            0.005162  (0 failed attempts)
 ```
 
-Every attempt — including failures — is appended to `log_path` as one JSON object
-per line with `ts`, `tier`, `model`, `ok`, token counts, `cost_usd`, and `error`.
+Malformed log lines are skipped and counted on stderr; they never abort the report.
+
+Every attempt is appended to `log_path` as one JSON object per line with `ts`,
+`tier`, `model`, `ok`, token counts, `cost_usd`, and `error`. Failed attempts are
+logged too (`ok: false`, `cost_usd: 0`), and an attempt that stopped the chain on
+`HTTP 401` carries `halted: true`.
 
 ## Tests
 

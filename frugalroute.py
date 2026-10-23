@@ -48,8 +48,12 @@ def load_config(path=None):
 
     pricing = cfg.setdefault("pricing", {})
     for model, price in pricing.items():
-        if not isinstance(price, dict) or "input" not in price or "output" not in price:
-            raise SystemExit(f'{p}: [pricing."{model}"] needs numeric input and output')
+        if not isinstance(price, dict):
+            raise SystemExit(f'{p}: [pricing."{model}"] must be a table')
+        for side in ("input", "output"):
+            value = price.get(side)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise SystemExit(f'{p}: [pricing."{model}"] {side} must be a number')
     unknown = [m for tier in cfg["tiers"] for m in tier["models"] if m not in pricing]
     if unknown:
         raise SystemExit(f'{p}: missing [pricing."<model>"] for: {", ".join(unknown)}')
@@ -162,9 +166,14 @@ def ask(cfg, prompt, tier=None):
         try:
             text, prompt_tokens, completion_tokens = chat(cfg, model, prompt)
         except urllib.error.HTTPError as exc:
-            # Config/auth errors are identical for every model in the chain.
-            if 400 <= exc.code < 500 and exc.code not in (408, 429):
-                raise SystemExit(f"{model}: HTTP {exc.code} {exc.reason} — check api_key_env/base_url")
+            # Only a bad key is fatal: every model in the chain would fail the same way.
+            # 400/403/404/408/429/5xx may be per-model, so fall forward.
+            if exc.code == 401:
+                error = f"HTTPError: {exc}"
+                log_call(cfg, {"ts": _now(), "tier": tier_name, "model": model, "ok": False,
+                               "halted": True, "error": error, "prompt_tokens": 0,
+                               "completion_tokens": 0, "cost_usd": 0.0})
+                raise SystemExit(f"{model}: HTTP 401 {exc.reason} — check {cfg['api_key_env']}")
             error = f"HTTPError: {exc}"
         except Exception as exc:  # ponytail: any failure falls forward; tighten if a provider needs classification
             error = f"{type(exc).__name__}: {exc}"
@@ -172,7 +181,13 @@ def ask(cfg, prompt, tier=None):
             if not prompt_tokens and not completion_tokens:
                 print(f"frugalroute: {model} returned no usage data; cost recorded as 0",
                       file=sys.stderr)
-            amount = cost_usd(cfg, model, prompt_tokens, completion_tokens)
+            try:
+                amount = cost_usd(cfg, model, prompt_tokens, completion_tokens)
+            except (KeyError, TypeError, ValueError) as exc:
+                # Never drop a response we already paid for.
+                amount = 0.0
+                print(f"frugalroute: could not price {model} ({exc!r}); cost recorded as 0",
+                      file=sys.stderr)
             log_call(cfg, {"ts": _now(), "tier": tier_name, "model": model, "ok": True,
                            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                            "cost_usd": amount})
@@ -193,24 +208,30 @@ def stats(cfg):
     total = 0.0
     calls = 0
     failures = 0
+    skipped = 0
     per_model = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not record.get("ok"):
-                failures += 1
+                if not isinstance(record, dict):
+                    raise TypeError("log line is not an object")
+                if not record.get("ok"):
+                    failures += 1
+                    continue
+                amount = float(record.get("cost_usd") or 0.0)
+                model = record.get("model") or "unknown"
+                prompt = int(record.get("prompt_tokens") or 0)
+                completion = int(record.get("completion_tokens") or 0)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                skipped += 1
                 continue
             calls += 1
-            amount = float(record.get("cost_usd") or 0.0)
             total += amount
-            row = per_model.setdefault(record.get("model", "unknown"),
-                                       {"calls": 0, "prompt": 0, "completion": 0, "cost": 0.0})
+            row = per_model.setdefault(model, {"calls": 0, "prompt": 0, "completion": 0, "cost": 0.0})
             row["calls"] += 1
-            row["prompt"] += int(record.get("prompt_tokens", 0))
-            row["completion"] += int(record.get("completion_tokens", 0))
+            row["prompt"] += prompt
+            row["completion"] += completion
             row["cost"] += amount
 
     width = max([len(m) for m in per_model] + [5])
@@ -219,6 +240,8 @@ def stats(cfg):
         row = per_model[model]
         print(f"{model:<{width}} {row['calls']:>6} {row['prompt']:>9} {row['completion']:>10} {row['cost']:>12.6f}")
     print(f"{'total':<{width}} {calls:>6} {'':>9} {'':>10} {total:>12.6f}  ({failures} failed attempts)")
+    if skipped:
+        print(f"({skipped} malformed log lines skipped)", file=sys.stderr)
 
 
 def build_parser():

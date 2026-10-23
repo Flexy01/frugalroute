@@ -103,7 +103,7 @@ def test_log_call_warns_instead_of_crashing(cfg, capsys):
     assert "could not write log" in capsys.readouterr().err
 
 
-def test_ask_stops_on_client_error_without_retrying(cfg, monkeypatch):
+def test_ask_stops_on_401_and_logs_the_halted_attempt(cfg, monkeypatch):
     import urllib.error
 
     seen = []
@@ -117,21 +117,71 @@ def test_ask_stops_on_client_error_without_retrying(cfg, monkeypatch):
         fr.ask(cfg, "hello", tier="standard")
     assert seen == ["m-std-1"]
 
+    records = read_log(cfg)
+    assert len(records) == 1
+    assert records[0]["model"] == "m-std-1"
+    assert records[0]["ok"] is False
+    assert records[0]["halted"] is True
+    assert "401" in records[0]["error"]
 
-def test_stats_survives_corrupt_line(cfg, capsys):
-    cfg["log_path"].write_text('{"ok": true, "cost_usd": null}\nnot json\n')
+
+@pytest.mark.parametrize("code", [400, 403, 404, 408, 429, 500, 503])
+def test_ask_falls_forward_on_non_401_http_errors(cfg, monkeypatch, code):
+    import urllib.error
+
+    seen = []
+
+    def fake_open(req, timeout):
+        model = json.loads(req.data)["model"]
+        seen.append(model)
+        if model == "m-std-1":
+            raise urllib.error.HTTPError(req.full_url, code, "err", {}, None)
+        return ok(model)
+
+    monkeypatch.setattr(fr, "_open", fake_open)
+    _, meta = fr.ask(cfg, "hello", tier="standard")
+
+    assert seen == ["m-std-1", "m-std-2"]
+    assert meta["model"] == "m-std-2"
+    assert [r["ok"] for r in read_log(cfg)] == [False, True]
+
+
+def test_stats_skips_malformed_rows_without_crashing(cfg, capsys):
+    cfg["log_path"].write_text("\n".join([
+        "not json",
+        "[1, 2, 3]",                                        # valid JSON, not an object
+        '{"ok": true, "model": "m-cheap", "cost_usd": null, "prompt_tokens": "x"}',
+        '{"ok": true, "model": "m-cheap", "cost_usd": 0.5}',
+    ]) + "\n")
+
     fr.stats(cfg)
-    assert "unknown" in capsys.readouterr().out
+
+    captured = capsys.readouterr()
+    assert "m-cheap" in captured.out
+    assert "0.500000" in captured.out
+    assert "3 malformed" in captured.err
 
 
-def test_load_config_rejects_pricing_without_input(tmp_path):
-    path = tmp_path / "bad2.toml"
+def test_load_config_rejects_non_numeric_price(tmp_path):
+    path = tmp_path / "bad3.toml"
     path.write_text(
         'base_url = "http://x"\napi_key_env = "K"\n'
-        '[[tiers]]\nname = "a"\nmodels = ["m"]\n[pricing."m"]\noutput = 1.0\n'
+        '[[tiers]]\nname = "a"\nmodels = ["m"]\n[pricing."m"]\ninput = "1.5"\noutput = 2.0\n'
     )
-    with pytest.raises(SystemExit, match="input"):
+    with pytest.raises(SystemExit, match="input must be a number"):
         fr.load_config(path)
+
+
+def test_unpriceable_model_still_returns_paid_answer(cfg, monkeypatch, capsys):
+    monkeypatch.setattr(fr, "_open", lambda req, timeout: ok("m-cheap", 10, 5, "answer"))
+    del cfg["pricing"]["m-cheap"]
+
+    text, meta = fr.ask(cfg, "hello", tier="cheap")
+
+    assert text == "answer"
+    assert meta["cost_usd"] == 0.0
+    assert "could not price" in capsys.readouterr().err
+    assert read_log(cfg)[0]["cost_usd"] == 0.0
 
 
 def test_fallback_chain_only_moves_up(cfg):
